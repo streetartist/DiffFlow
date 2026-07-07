@@ -11,6 +11,8 @@ var _open_scene_cache: Dictionary = {}
 var _scene_notice_cache: Dictionary = {}
 var _takeover_waiting: Dictionary = {}
 var _takeover_granting: Dictionary = {}
+var _active_dialog: Window = null
+var _dialog_queue: Array = []
 
 const SCENE_POLL_INTERVAL := 0.5
 
@@ -138,8 +140,7 @@ func _show_takeover_prompt(rel_path: String, owner_peer_id: String, owner_userna
 		_close_scene_path(rel_path)
 		dialog.queue_free()
 	)
-	EditorInterface.get_base_control().add_child(dialog)
-	dialog.popup_centered(Vector2i(520, 220))
+	_enqueue_dialog(dialog, Vector2i(520, 220))
 
 func _request_scene_takeover(rel_path: String, owner_peer_id: String, owner_username: String) -> void:
 	_takeover_waiting[rel_path] = {
@@ -174,8 +175,7 @@ func _on_remote_scene_takeover_requested(payload: Dictionary) -> void:
 		_sync_engine.send_scene_takeover_denied(rel_path, requester_peer_id, "对方拒绝了接管请求")
 		dialog.queue_free()
 	)
-	EditorInterface.get_base_control().add_child(dialog)
-	dialog.popup_centered(Vector2i(520, 220))
+	_enqueue_dialog(dialog, Vector2i(520, 220))
 
 func _approve_scene_takeover(rel_path: String, requester_peer_id: String, requester_username: String) -> void:
 	if _takeover_granting.has(rel_path):
@@ -369,8 +369,7 @@ func _ask_merge(rel_path: String, payload: Dictionary) -> void:
 		dialog.queue_free()
 	)
 	
-	EditorInterface.get_base_control().add_child(dialog)
-	dialog.popup_centered(Vector2i(450, 180))
+	_enqueue_dialog(dialog, Vector2i(450, 180))
 
 func _on_sync_conflict(rel_path: String, action: String, remote_sha: String) -> void:
 	var dialog := ConfirmationDialog.new()
@@ -390,8 +389,7 @@ func _on_sync_conflict(rel_path: String, action: String, remote_sha: String) -> 
 		dialog.queue_free()
 	)
 
-	EditorInterface.get_base_control().add_child(dialog)
-	dialog.popup_centered(Vector2i(460, 190))
+	_enqueue_dialog(dialog, Vector2i(460, 190))
 
 func _accept_remote_after_conflict(rel_path: String, remote_sha: String) -> void:
 	if remote_sha.is_empty():
@@ -404,5 +402,33 @@ func _show_info(text: String) -> void:
 	dialog.title = "DiffFlow"
 	dialog.dialog_text = text
 	dialog.confirmed.connect(dialog.queue_free)
+	dialog.canceled.connect(dialog.queue_free)
+	_enqueue_dialog(dialog, Vector2i(400, 150))
+
+func _enqueue_dialog(dialog: Window, popup_size: Vector2i) -> void:
+	_dialog_queue.append({
+		"dialog": dialog,
+		"size": popup_size,
+	})
+	_popup_next_dialog()
+
+func _popup_next_dialog() -> void:
+	if _active_dialog != null and is_instance_valid(_active_dialog):
+		return
+	if _dialog_queue.is_empty():
+		_active_dialog = null
+		return
+	var item: Dictionary = _dialog_queue.pop_front()
+	var dialog: Window = item.get("dialog")
+	var popup_size: Vector2i = item.get("size", Vector2i(400, 150))
+	if dialog == null or not is_instance_valid(dialog):
+		_popup_next_dialog()
+		return
+	_active_dialog = dialog
+	dialog.tree_exited.connect(func() -> void:
+		if _active_dialog == dialog:
+			_active_dialog = null
+			_popup_next_dialog()
+	)
 	EditorInterface.get_base_control().add_child(dialog)
-	dialog.popup_centered(Vector2i(400, 150))
+	dialog.popup_centered(popup_size)
