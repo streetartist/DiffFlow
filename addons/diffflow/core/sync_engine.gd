@@ -6,6 +6,11 @@ class_name DFSyncEngine
 
 signal remote_file_updated(payload: Dictionary)
 signal remote_file_deleted(payload: Dictionary)
+signal remote_scene_opened(payload: Dictionary)
+signal remote_scene_busy(payload: Dictionary)
+signal remote_scene_takeover_requested(payload: Dictionary)
+signal remote_scene_takeover_approved(payload: Dictionary)
+signal remote_scene_takeover_denied(payload: Dictionary)
 signal presence_updated(peer_info: Dictionary)
 signal connection_changed(connected: bool)
 
@@ -130,6 +135,48 @@ func send_text(data: String) -> void:
 	if _connected:
 		_ws.send_text(data)
 
+func send_scene_opened(rel_path: String) -> void:
+	_send_scene_event("scene_opened", rel_path)
+
+func send_scene_released(rel_path: String) -> void:
+	_send_scene_event("scene_released", rel_path)
+
+func send_scene_takeover_request(rel_path: String, target_peer_id: String) -> void:
+	_send_scene_event("scene_takeover_request", rel_path, target_peer_id)
+
+func send_scene_takeover_approved(rel_path: String, target_peer_id: String, sha256: String = "") -> void:
+	var extra := {}
+	if not sha256.is_empty():
+		extra["sha256"] = sha256
+	_send_scene_event("scene_takeover_approved", rel_path, target_peer_id, extra)
+
+func send_scene_takeover_denied(rel_path: String, target_peer_id: String, reason: String = "") -> void:
+	var extra := {}
+	if not reason.is_empty():
+		extra["reason"] = reason
+	_send_scene_event("scene_takeover_denied", rel_path, target_peer_id, extra)
+
+func _send_scene_event(event_type: String, rel_path: String, target_peer_id: String = "", extra: Dictionary = {}) -> void:
+	rel_path = rel_path.replace("\\", "/").strip_edges()
+	if not _connected or rel_path.is_empty():
+		return
+	if not (rel_path.ends_with(".tscn") or rel_path.ends_with(".scn")):
+		return
+	var msg := {
+		"type": event_type,
+		"path": rel_path,
+		"peer_id": _peer_id,
+		"client_id": _client_id,
+		"username": _username,
+		"project_id": _project_id,
+		"project_name": _project_name,
+	}
+	if not target_peer_id.is_empty():
+		msg["target_peer_id"] = target_peer_id
+	for key in extra.keys():
+		msg[key] = extra[key]
+	_ws.send_text(JSON.stringify(msg))
+
 func _send_presence() -> void:
 	var msg := {
 		"type": "presence",
@@ -150,12 +197,25 @@ func _on_message(data: PackedByteArray) -> void:
 	var sender: String = event.get("peer_id", "")
 	if sender == _peer_id:
 		return
+	var target_peer_id: String = event.get("target_peer_id", "")
+	if not target_peer_id.is_empty() and target_peer_id != _peer_id:
+		return
 	var msg_type: String = event.get("type", "")
 	match msg_type:
 		"file_updated":
 			remote_file_updated.emit(event)
 		"file_deleted":
 			remote_file_deleted.emit(event)
+		"scene_opened":
+			remote_scene_opened.emit(event)
+		"scene_busy":
+			remote_scene_busy.emit(event)
+		"scene_takeover_request":
+			remote_scene_takeover_requested.emit(event)
+		"scene_takeover_approved":
+			remote_scene_takeover_approved.emit(event)
+		"scene_takeover_denied":
+			remote_scene_takeover_denied.emit(event)
 		"presence":
 			presence_updated.emit(event)
 

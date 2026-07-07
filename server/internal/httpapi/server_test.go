@@ -76,7 +76,8 @@ func TestLoginProjectAndFileSync(t *testing.T) {
 		t.Fatalf("projects status = %d", resp.StatusCode)
 	}
 
-	fileURL := server.URL + "/api/projects/" + strconv.FormatInt(project.ID, 10) + "/files?path=scenes/main.tscn&mtime=123"
+	fileBaseURL := server.URL + "/api/projects/" + strconv.FormatInt(project.ID, 10) + "/files?path=scenes/main.tscn"
+	fileURL := fileBaseURL + "&mtime=123&base_sha="
 	req, err = http.NewRequest(http.MethodPut, fileURL, bytes.NewBufferString("scene-data"))
 	if err != nil {
 		t.Fatal(err)
@@ -132,7 +133,8 @@ func TestLoginProjectAndFileSync(t *testing.T) {
 		t.Fatalf("downloaded %q", string(body))
 	}
 
-	req, err = http.NewRequest(http.MethodDelete, fileURL+"&mtime="+strconv.FormatInt(time.Now().Unix(), 10), nil)
+	baseSHA := manifest.Files[0].SHA256
+	req, err = http.NewRequest(http.MethodDelete, fileBaseURL+"&mtime="+strconv.FormatInt(time.Now().Unix(), 10)+"&base_sha="+baseSHA, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,6 +153,106 @@ func TestLoginProjectAndFileSync(t *testing.T) {
 	}
 	if len(files) != 0 {
 		t.Fatalf("manifest after delete = %#v", files)
+	}
+}
+
+func TestFileUploadRejectsStaleBaseSHA(t *testing.T) {
+	tmp := t.TempDir()
+	db, err := store.NewDB(filepath.Join(tmp, "diffflow.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	adminHash, err := auth.HashPassword("admin-pass")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.EnsureConfiguredAdmin("admin", adminHash); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.EnsureSetting(maxFileSettingKey, strconv.FormatInt(100*1024*1024, 10)); err != nil {
+		t.Fatal(err)
+	}
+	project, err := db.CreateProject("Game")
+	if err != nil {
+		t.Fatal(err)
+	}
+	userHash, err := auth.HashPassword("alice-pass")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.CreateUser("alice", userHash, []int64{project.ID}); err != nil {
+		t.Fatal(err)
+	}
+
+	objectStore, err := files.NewStore(filepath.Join(tmp, "files"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := New(db, auth.NewTokenManager("test-secret"), hub.NewBroker(), objectStore, 100*1024*1024)
+	server := httptest.NewServer(app.Routes())
+	defer server.Close()
+
+	token := loginForTest(t, server.URL, "alice", "alice-pass")
+	fileBaseURL := server.URL + "/api/projects/" + strconv.FormatInt(project.ID, 10) + "/files?path=scenes/main.tscn"
+
+	req, err := http.NewRequest(http.MethodPut, fileBaseURL+"&mtime=100&base_sha=", bytes.NewBufferString("v1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("initial upload status = %d", resp.StatusCode)
+	}
+
+	snapshot, err := db.GetFileSnapshot(project.ID, "scenes/main.tscn")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req, err = http.NewRequest(http.MethodPut, fileBaseURL+"&mtime=101&base_sha=", bytes.NewBufferString("stale"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("stale upload status = %d body = %s", resp.StatusCode, string(body))
+	}
+
+	var conflict struct {
+		CurrentSHA string `json:"current_sha"`
+	}
+	if err := json.Unmarshal(body, &conflict); err != nil {
+		t.Fatal(err)
+	}
+	if conflict.CurrentSHA != snapshot.SHA256 {
+		t.Fatalf("current_sha = %q, want %q", conflict.CurrentSHA, snapshot.SHA256)
+	}
+
+	req, err = http.NewRequest(http.MethodPut, fileBaseURL+"&mtime=102&base_sha="+snapshot.SHA256, bytes.NewBufferString("v2"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("overwrite upload status = %d", resp.StatusCode)
 	}
 }
 

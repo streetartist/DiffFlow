@@ -212,6 +212,11 @@ func (s *Server) uploadFile(w http.ResponseWriter, r *http.Request, projectID in
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	baseSHA, err := requiredBaseSHA(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	maxFileBytes, err := s.maxFileBytes()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not load settings")
@@ -231,7 +236,10 @@ func (s *Server) uploadFile(w http.ResponseWriter, r *http.Request, projectID in
 		writeError(w, http.StatusInternalServerError, "could not save file object")
 		return
 	}
-	if err := s.db.UpsertFileSnapshot(projectID, relPath, sha, size, mtime, user.ID); err != nil {
+	if current, err := s.db.UpsertFileSnapshotIfBase(projectID, relPath, sha, size, mtime, user.ID, baseSHA); errors.Is(err, store.ErrConflict) {
+		writeSnapshotConflict(w, current)
+		return
+	} else if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not save file snapshot")
 		return
 	}
@@ -261,8 +269,16 @@ func (s *Server) deleteFile(w http.ResponseWriter, r *http.Request, projectID in
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	baseSHA, err := requiredBaseSHA(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	mtime := parseInt64Query(r, "mtime", time.Now().Unix())
-	if err := s.db.MarkFileDeleted(projectID, relPath, mtime, user.ID); err != nil {
+	if current, err := s.db.MarkFileDeletedIfBase(projectID, relPath, mtime, user.ID, baseSHA); errors.Is(err, store.ErrConflict) {
+		writeSnapshotConflict(w, current)
+		return
+	} else if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not delete file")
 		return
 	}
@@ -289,4 +305,36 @@ func parseInt64Query(r *http.Request, key string, fallback int64) int64 {
 		return fallback
 	}
 	return n
+}
+
+func requiredBaseSHA(r *http.Request) (string, error) {
+	values, ok := r.URL.Query()["base_sha"]
+	if !ok {
+		return "", errors.New("base_sha is required")
+	}
+	baseSHA := strings.TrimSpace(values[0])
+	if baseSHA == "" {
+		return "", nil
+	}
+	if len(baseSHA) != 64 {
+		return "", errors.New("base_sha must be empty or a sha256 hex string")
+	}
+	for _, ch := range baseSHA {
+		if !((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F')) {
+			return "", errors.New("base_sha must be empty or a sha256 hex string")
+		}
+	}
+	return strings.ToLower(baseSHA), nil
+}
+
+func writeSnapshotConflict(w http.ResponseWriter, current *store.FileSnapshot) {
+	currentSHA := ""
+	if current != nil && !current.Deleted {
+		currentSHA = current.SHA256
+	}
+	writeJSON(w, http.StatusConflict, map[string]any{
+		"error":       "conflict",
+		"current_sha": currentSHA,
+		"current":     current,
+	})
 }

@@ -4,6 +4,10 @@ class_name DFFileWatcher
 
 ## Watches project files and syncs bytes through the server HTTP API.
 
+signal sync_conflict(rel_path: String, action: String, remote_sha: String)
+signal upload_finished(rel_path: String, ok: bool, sha: String, error: String)
+signal download_finished(rel_path: String, ok: bool, sha: String, error: String)
+
 var sync_engine: DFSyncEngine
 var plugin  # EditorPlugin 引用
 
@@ -12,7 +16,8 @@ var _poll_timer := 0.0
 const POLL_INTERVAL := 1.5
 
 var _file_cache: Dictionary = {}  # { rel_path: mtime }
-var _hash_cache: Dictionary = {}  # { rel_path: sha256 }
+var _hash_cache: Dictionary = {}  # { rel_path: local sha256 }
+var _base_sha_cache: Dictionary = {}  # { rel_path: last known server sha256 }
 var _project_path: String = ""
 var _server_url: String = ""
 var _token: String = ""
@@ -39,6 +44,7 @@ func start(project_path: String) -> void:
 		_project_path += "/"
 	_file_cache.clear()
 	_hash_cache.clear()
+	_base_sha_cache.clear()
 	_load_ignore_rules(true)
 	_scan_dir(_project_path, true)
 	_watching = false
@@ -82,9 +88,11 @@ func _check_changes() -> void:
 		var rel_path: String = str(rel_path_value)
 		_file_cache.erase(rel_path)
 		_hash_cache.erase(rel_path)
+		var base_sha: String = str(_base_sha_cache.get(rel_path, ""))
 		if _should_ignore_path(rel_path):
+			_base_sha_cache.erase(rel_path)
 			continue
-		_delete_remote(rel_path)
+		_delete_remote(rel_path, base_sha)
 
 func _initial_sync() -> void:
 	if _server_url.is_empty() or _token.is_empty() or _project_id <= 0:
@@ -134,20 +142,21 @@ func _initial_sync() -> void:
 func _sync_manifest_file(rel_path: String, remote: Dictionary) -> void:
 	var full_path: String = _project_path + rel_path
 	if not FileAccess.file_exists(full_path):
-		await _download_file(rel_path)
+		await _download_file(rel_path, str(remote.get("sha256", "")))
 		return
 
 	var local_hash: String = _file_sha256(full_path)
 	_hash_cache[rel_path] = local_hash
 	if local_hash == remote.get("sha256", ""):
+		_base_sha_cache[rel_path] = local_hash
 		return
 
 	var local_mtime: int = FileAccess.get_modified_time(full_path)
 	var remote_mtime: int = int(remote.get("mtime", 0))
 	if local_mtime > remote_mtime:
-		await _upload_file(rel_path)
+		await _upload_file(rel_path, str(remote.get("sha256", "")))
 	else:
-		await _download_file(rel_path)
+		await _download_file(rel_path, str(remote.get("sha256", "")))
 
 func _to_rel_path(full_path: String) -> String:
 	var normalized: String = full_path.replace("\\", "/")
@@ -310,54 +319,80 @@ func _pattern_matches_path(pattern: String, rel_path: String, anchored: bool) ->
 			return true
 	return rel_path.get_file().match(pattern)
 
-func upload_local_file(rel_path: String) -> void:
-	call_deferred("_upload_file", rel_path)
+func upload_local_file(rel_path: String, base_sha_override: Variant = null) -> void:
+	call_deferred("_upload_file", rel_path, base_sha_override)
 
-func _upload_file(rel_path: String) -> void:
+func _upload_file(rel_path: String, base_sha_override: Variant = null) -> void:
 	if _server_url.is_empty() or _token.is_empty() or _project_id <= 0:
+		upload_finished.emit(rel_path, false, "", "not configured")
 		return
 	if _should_ignore_path(rel_path):
+		upload_finished.emit(rel_path, false, "", "ignored")
 		return
 	var full_path: String = _project_path + rel_path
 	if not FileAccess.file_exists(full_path):
+		upload_finished.emit(rel_path, false, "", "file not found")
 		return
 	var size: int = _file_size(full_path)
 	if size > _max_file_bytes:
 		print("[DiffFlow] 跳过超过同步阈值的文件：", rel_path, " (", size, " bytes)")
+		upload_finished.emit(rel_path, false, "", "file exceeds sync threshold")
 		return
 	var file: FileAccess = FileAccess.open(full_path, FileAccess.READ)
 	if file == null:
+		upload_finished.emit(rel_path, false, "", "could not open file")
 		return
 	var content: PackedByteArray = file.get_buffer(file.get_length())
 	file.close()
 	var mtime: int = FileAccess.get_modified_time(full_path)
+	var base_sha: String = str(_base_sha_cache.get(rel_path, ""))
+	if base_sha_override != null:
+		base_sha = str(base_sha_override)
 	_transferring[rel_path] = true
-	var path: String = "/api/projects/%d/files?path=%s&mtime=%d" % [_project_id, rel_path.uri_encode(), mtime]
+	var path: String = "/api/projects/%d/files?path=%s&mtime=%d&base_sha=%s" % [_project_id, rel_path.uri_encode(), mtime, base_sha.uri_encode()]
 	var response: Dictionary = await _request_raw(HTTPClient.METHOD_PUT, path, content)
 	_transferring.erase(rel_path)
 	if response.get("ok", false):
 		_file_cache[rel_path] = mtime
 		var data: Dictionary = response.get("data", {})
-		_hash_cache[rel_path] = data.get("sha256", _file_sha256(full_path))
+		var sha: String = data.get("sha256", _file_sha256(full_path))
+		_hash_cache[rel_path] = sha
+		_base_sha_cache[rel_path] = sha
+		upload_finished.emit(rel_path, true, sha, "")
+	elif int(response.get("status", 0)) == 409:
+		sync_conflict.emit(rel_path, "upload", _conflict_remote_sha(response))
+		upload_finished.emit(rel_path, false, "", "conflict")
 	else:
-		push_warning("[DiffFlow] 上传失败：" + rel_path + " - " + str(response.get("error", "unknown error")))
+		var error := str(response.get("error", "unknown error"))
+		push_warning("[DiffFlow] 上传失败：" + rel_path + " - " + error)
+		upload_finished.emit(rel_path, false, "", error)
 
-func _delete_remote(rel_path: String) -> void:
+func delete_remote_file(rel_path: String, base_sha_override: Variant = null) -> void:
+	call_deferred("_delete_remote", rel_path, base_sha_override)
+
+func _delete_remote(rel_path: String, base_sha_override: Variant = null) -> void:
 	if _server_url.is_empty() or _token.is_empty() or _project_id <= 0:
 		return
 	if _should_ignore_path(rel_path):
 		return
+	var base_sha: String = str(_base_sha_cache.get(rel_path, ""))
+	if base_sha_override != null:
+		base_sha = str(base_sha_override)
 	var mtime: int = int(Time.get_unix_time_from_system())
-	var path: String = "/api/projects/%d/files?path=%s&mtime=%d" % [_project_id, rel_path.uri_encode(), mtime]
+	var path: String = "/api/projects/%d/files?path=%s&mtime=%d&base_sha=%s" % [_project_id, rel_path.uri_encode(), mtime, base_sha.uri_encode()]
 	var response: Dictionary = await _request_json(HTTPClient.METHOD_DELETE, path)
-	if not response.get("ok", false):
+	if response.get("ok", false):
+		_base_sha_cache.erase(rel_path)
+	elif int(response.get("status", 0)) == 409:
+		sync_conflict.emit(rel_path, "delete", _conflict_remote_sha(response))
+	else:
 		push_warning("[DiffFlow] 删除同步失败：" + rel_path + " - " + str(response.get("error", "unknown error")))
 
 func apply_remote_update(payload: Dictionary) -> void:
 	var rel_path: String = payload.get("path", "")
 	if rel_path.is_empty() or _should_ignore_path(rel_path):
 		return
-	call_deferred("_download_file", rel_path)
+	call_deferred("_download_file", rel_path, str(payload.get("sha256", "")))
 
 func apply_remote_delete(payload: Dictionary) -> void:
 	var rel_path: String = payload.get("path", "")
@@ -366,25 +401,30 @@ func apply_remote_delete(payload: Dictionary) -> void:
 	var full_path: String = _project_path + rel_path
 	var res_path: String = "res://" + rel_path
 
+	_file_cache.erase(rel_path)
+	_hash_cache.erase(rel_path)
+	_base_sha_cache.erase(rel_path)
 	if FileAccess.file_exists(full_path):
 		_transferring[rel_path] = true
 		DirAccess.remove_absolute(full_path)
-		_file_cache.erase(rel_path)
-		_hash_cache.erase(rel_path)
 		_transferring.erase(rel_path)
 		EditorInterface.get_resource_filesystem().update_file(res_path)
 
-func _download_file(rel_path: String) -> void:
+func _download_file(rel_path: String, expected_sha: String = "") -> void:
 	if _server_url.is_empty() or _token.is_empty() or _project_id <= 0:
+		download_finished.emit(rel_path, false, "", "not configured")
 		return
 	if _should_ignore_path(rel_path):
+		download_finished.emit(rel_path, false, "", "ignored")
 		return
 	var path: String = "/api/projects/%d/files?path=%s" % [_project_id, rel_path.uri_encode()]
 	_transferring[rel_path] = true
 	var response: Dictionary = await _request_raw(HTTPClient.METHOD_GET, path)
 	if not response.get("ok", false):
 		_transferring.erase(rel_path)
-		push_warning("[DiffFlow] 下载失败：" + rel_path + " - " + str(response.get("error", "unknown error")))
+		var error := str(response.get("error", "unknown error"))
+		push_warning("[DiffFlow] 下载失败：" + rel_path + " - " + error)
+		download_finished.emit(rel_path, false, "", error)
 		return
 
 	var full_path: String = _project_path + rel_path
@@ -398,10 +438,15 @@ func _download_file(rel_path: String) -> void:
 		file.store_buffer(body)
 		file.close()
 		_file_cache[rel_path] = FileAccess.get_modified_time(full_path)
-		_hash_cache[rel_path] = _file_sha256(full_path)
+		var sha := _file_sha256(full_path)
+		_hash_cache[rel_path] = sha
+		_base_sha_cache[rel_path] = expected_sha if not expected_sha.is_empty() else sha
 		if rel_path == IGNORE_FILE_NAME:
 			_load_ignore_rules(true)
 		_reload_in_editor(res_path)
+		download_finished.emit(rel_path, true, sha, "")
+	else:
+		download_finished.emit(rel_path, false, "", "could not write file")
 	_transferring.erase(rel_path)
 
 func _reload_in_editor(res_path: String) -> void:
@@ -439,6 +484,13 @@ func _request_json(method: int, path: String, body: Dictionary = {}) -> Dictiona
 
 func _request_raw(method: int, path: String, body: PackedByteArray = PackedByteArray()) -> Dictionary:
 	return await _request(method, path, _auth_headers(), body)
+
+func _conflict_remote_sha(response: Dictionary) -> String:
+	var body: PackedByteArray = response.get("body", PackedByteArray())
+	var parsed: Variant = JSON.parse_string(body.get_string_from_utf8())
+	if parsed is Dictionary:
+		return str(parsed.get("current_sha", ""))
+	return ""
 
 func _request(method: int, path: String, headers: PackedStringArray, body: PackedByteArray) -> Dictionary:
 	var http: HTTPRequest = HTTPRequest.new()

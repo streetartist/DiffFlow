@@ -9,6 +9,7 @@ import (
 )
 
 var ErrNotFound = errors.New("not found")
+var ErrConflict = errors.New("conflict")
 
 type User struct {
 	ID           int64  `json:"id"`
@@ -404,6 +405,46 @@ func (d *DB) UpsertFileSnapshot(projectID int64, path, sha256 string, size, mtim
 	return err
 }
 
+func (d *DB) UpsertFileSnapshotIfBase(projectID int64, path, sha256 string, size, mtime, userID int64, baseSHA string) (*FileSnapshot, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	tx, err := d.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	current, err := fileSnapshotInTx(tx, projectID, path)
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		return nil, err
+	}
+	currentSHA := ""
+	if current != nil && !current.Deleted {
+		currentSHA = current.SHA256
+	}
+	if currentSHA != baseSHA {
+		return current, ErrConflict
+	}
+
+	_, err = tx.Exec(
+		`INSERT INTO file_snapshots (project_id, path, sha256, size, mtime, updated_by, deleted)
+		 VALUES (?, ?, ?, ?, ?, ?, 0)
+		 ON CONFLICT(project_id, path) DO UPDATE SET
+			sha256 = excluded.sha256,
+			size = excluded.size,
+			mtime = excluded.mtime,
+			updated_by = excluded.updated_by,
+			updated_at = strftime('%s','now'),
+			deleted = 0`,
+		projectID, path, sha256, size, mtime, userID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return nil, tx.Commit()
+}
+
 func (d *DB) MarkFileDeleted(projectID int64, path string, mtime, userID int64) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -421,10 +462,56 @@ func (d *DB) MarkFileDeleted(projectID int64, path string, mtime, userID int64) 
 	return err
 }
 
+func (d *DB) MarkFileDeletedIfBase(projectID int64, path string, mtime, userID int64, baseSHA string) (*FileSnapshot, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	tx, err := d.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	current, err := fileSnapshotInTx(tx, projectID, path)
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		return nil, err
+	}
+	currentSHA := ""
+	if current != nil && !current.Deleted {
+		currentSHA = current.SHA256
+	}
+	if currentSHA != baseSHA {
+		return current, ErrConflict
+	}
+
+	_, err = tx.Exec(
+		`INSERT INTO file_snapshots (project_id, path, sha256, size, mtime, updated_by, deleted)
+		 VALUES (?, ?, '', 0, ?, ?, 1)
+		 ON CONFLICT(project_id, path) DO UPDATE SET
+			size = 0,
+			mtime = excluded.mtime,
+			updated_by = excluded.updated_by,
+			updated_at = strftime('%s','now'),
+			deleted = 1`,
+		projectID, path, mtime, userID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return nil, tx.Commit()
+}
+
 func (d *DB) GetFileSnapshot(projectID int64, path string) (*FileSnapshot, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	snapshot, err := scanFileSnapshot(d.db.QueryRow(
+	snapshot, err := fileSnapshotInTx(d.db, projectID, path)
+	return snapshot, err
+}
+
+func fileSnapshotInTx(db interface {
+	QueryRow(query string, args ...any) *sql.Row
+}, projectID int64, path string) (*FileSnapshot, error) {
+	snapshot, err := scanFileSnapshot(db.QueryRow(
 		`SELECT project_id, path, sha256, size, mtime, updated_by, updated_at, deleted
 		 FROM file_snapshots WHERE project_id = ? AND path = ?`,
 		projectID, path,
