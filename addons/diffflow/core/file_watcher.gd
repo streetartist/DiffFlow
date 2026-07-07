@@ -50,7 +50,7 @@ func start(project_path: String) -> void:
 	_watching = false
 	_initial_syncing = true
 	print("[DiffFlow] 开始首次同步，本地文件：", _file_cache.size())
-	call_deferred("_initial_sync")
+	_initial_sync()
 
 func stop() -> void:
 	_watching = false
@@ -320,7 +320,7 @@ func _pattern_matches_path(pattern: String, rel_path: String, anchored: bool) ->
 	return rel_path.get_file().match(pattern)
 
 func upload_local_file(rel_path: String, base_sha_override: Variant = null) -> void:
-	call_deferred("_upload_file", rel_path, base_sha_override)
+	_upload_file(rel_path, base_sha_override)
 
 func _upload_file(rel_path: String, base_sha_override: Variant = null) -> void:
 	if _server_url.is_empty() or _token.is_empty() or _project_id <= 0:
@@ -368,7 +368,7 @@ func _upload_file(rel_path: String, base_sha_override: Variant = null) -> void:
 		upload_finished.emit(rel_path, false, "", error)
 
 func delete_remote_file(rel_path: String, base_sha_override: Variant = null) -> void:
-	call_deferred("_delete_remote", rel_path, base_sha_override)
+	_delete_remote(rel_path, base_sha_override)
 
 func _delete_remote(rel_path: String, base_sha_override: Variant = null) -> void:
 	if _server_url.is_empty() or _token.is_empty() or _project_id <= 0:
@@ -392,7 +392,7 @@ func apply_remote_update(payload: Dictionary) -> void:
 	var rel_path: String = payload.get("path", "")
 	if rel_path.is_empty() or _should_ignore_path(rel_path):
 		return
-	call_deferred("_download_file", rel_path, str(payload.get("sha256", "")))
+	_download_file(rel_path, str(payload.get("sha256", "")))
 
 func apply_remote_delete(payload: Dictionary) -> void:
 	var rel_path: String = payload.get("path", "")
@@ -408,7 +408,7 @@ func apply_remote_delete(payload: Dictionary) -> void:
 		_transferring[rel_path] = true
 		DirAccess.remove_absolute(full_path)
 		_transferring.erase(rel_path)
-		EditorInterface.get_resource_filesystem().update_file(res_path)
+		await _update_editor_file(res_path)
 
 func _download_file(rel_path: String, expected_sha: String = "") -> void:
 	if _server_url.is_empty() or _token.is_empty() or _project_id <= 0:
@@ -443,19 +443,19 @@ func _download_file(rel_path: String, expected_sha: String = "") -> void:
 		_base_sha_cache[rel_path] = expected_sha if not expected_sha.is_empty() else sha
 		if rel_path == IGNORE_FILE_NAME:
 			_load_ignore_rules(true)
-		_reload_in_editor(res_path)
+		await _reload_in_editor(res_path)
 		download_finished.emit(rel_path, true, sha, "")
 	else:
 		download_finished.emit(rel_path, false, "", "could not write file")
 	_transferring.erase(rel_path)
 
 func _reload_in_editor(res_path: String) -> void:
-	var efs: EditorFileSystem = EditorInterface.get_resource_filesystem()
-	efs.update_file(res_path)
+	await _update_editor_file(res_path)
 
 	if res_path.ends_with(".tscn") or res_path.ends_with(".scn"):
 		var open_scenes: PackedStringArray = EditorInterface.get_open_scenes()
 		if res_path in open_scenes:
+			await _wait_editor_safe_point()
 			EditorInterface.reload_scene_from_path(res_path)
 	elif res_path.ends_with(".gd") or res_path.ends_with(".cs"):
 		if ResourceLoader.exists(res_path):
@@ -465,6 +465,18 @@ func _reload_in_editor(res_path: String) -> void:
 	elif res_path.ends_with(".tres") or res_path.ends_with(".res"):
 		if ResourceLoader.exists(res_path):
 			ResourceLoader.load(res_path, "", ResourceLoader.CACHE_MODE_REPLACE)
+
+func _update_editor_file(res_path: String) -> void:
+	await _wait_editor_safe_point()
+	EditorInterface.get_resource_filesystem().update_file(res_path)
+
+func _wait_editor_safe_point() -> void:
+	if not is_inside_tree():
+		return
+	await get_tree().process_frame
+	if not is_inside_tree():
+		return
+	await get_tree().create_timer(0.05).timeout
 
 func _request_json(method: int, path: String, body: Dictionary = {}) -> Dictionary:
 	var payload: PackedByteArray = PackedByteArray()
