@@ -22,7 +22,7 @@ var _initial_syncing := false
 var _transferring: Dictionary = {}
 
 const IGNORE_DIRS := [".godot", ".git", ".import", ".claude", ".uid"]
-const IGNORE_EXTENSIONS := [".uid", ".import", ".tmp", ".remap"]
+const IGNORE_FILE_SUFFIXES := [".uid", ".import", ".tmp", ".remap", ".db", ".sqlite", ".sqlite3", "-shm", "-wal", "-journal"]
 
 func configure(server_url: String, token: String, project_id: int, max_file_bytes: int) -> void:
 	_server_url = _normalize_server_url(server_url)
@@ -102,6 +102,8 @@ func _initial_sync() -> void:
 
 	for rel_path_value in server_files.keys():
 		var rel_path: String = str(rel_path_value)
+		if _should_ignore_path(rel_path):
+			continue
 		var remote: Dictionary = server_files[rel_path]
 		var full_path: String = _project_path + rel_path
 		if not FileAccess.file_exists(full_path):
@@ -151,7 +153,7 @@ func _scan_dir(path: String, initial: bool, out: Dictionary = {}) -> void:
 			if not _should_ignore_dir(fname):
 				_scan_dir(full_path, initial, out)
 		else:
-			if not _should_ignore_file(fname):
+			if not _should_ignore_path(rel_path):
 				var mtime: int = FileAccess.get_modified_time(full_path)
 				if initial:
 					_file_cache[rel_path] = mtime
@@ -166,9 +168,10 @@ func _should_ignore_dir(dirname: String) -> bool:
 			return true
 	return false
 
-func _should_ignore_file(filename: String) -> bool:
-	for ext in IGNORE_EXTENSIONS:
-		if filename.ends_with(ext):
+func _should_ignore_path(rel_path: String) -> bool:
+	var filename: String = rel_path.get_file()
+	for suffix in IGNORE_FILE_SUFFIXES:
+		if filename.ends_with(suffix):
 			return true
 	return false
 
@@ -177,6 +180,8 @@ func upload_local_file(rel_path: String) -> void:
 
 func _upload_file(rel_path: String) -> void:
 	if _server_url.is_empty() or _token.is_empty() or _project_id <= 0:
+		return
+	if _should_ignore_path(rel_path):
 		return
 	var full_path: String = _project_path + rel_path
 	if not FileAccess.file_exists(full_path):
@@ -205,6 +210,8 @@ func _upload_file(rel_path: String) -> void:
 func _delete_remote(rel_path: String) -> void:
 	if _server_url.is_empty() or _token.is_empty() or _project_id <= 0:
 		return
+	if _should_ignore_path(rel_path):
+		return
 	var mtime: int = int(Time.get_unix_time_from_system())
 	var path: String = "/api/projects/%d/files?path=%s&mtime=%d" % [_project_id, rel_path.uri_encode(), mtime]
 	var response: Dictionary = await _request_json(HTTPClient.METHOD_DELETE, path)
@@ -213,13 +220,13 @@ func _delete_remote(rel_path: String) -> void:
 
 func apply_remote_update(payload: Dictionary) -> void:
 	var rel_path: String = payload.get("path", "")
-	if rel_path.is_empty():
+	if rel_path.is_empty() or _should_ignore_path(rel_path):
 		return
 	call_deferred("_download_file", rel_path)
 
 func apply_remote_delete(payload: Dictionary) -> void:
 	var rel_path: String = payload.get("path", "")
-	if rel_path.is_empty():
+	if rel_path.is_empty() or _should_ignore_path(rel_path):
 		return
 	var full_path: String = _project_path + rel_path
 	var res_path: String = "res://" + rel_path
@@ -234,6 +241,8 @@ func apply_remote_delete(payload: Dictionary) -> void:
 
 func _download_file(rel_path: String) -> void:
 	if _server_url.is_empty() or _token.is_empty() or _project_id <= 0:
+		return
+	if _should_ignore_path(rel_path):
 		return
 	var path: String = "/api/projects/%d/files?path=%s" % [_project_id, rel_path.uri_encode()]
 	_transferring[rel_path] = true

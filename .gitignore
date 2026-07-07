@@ -19,6 +19,9 @@ server/diffflow-server-linux
 server/*.db
 server/*.db-shm
 server/*.db-wal
+server/*.db-*
+server/*.db*.tmp
+server/*.sqlite*
 server/data/
 server/*.log
 .gocache/
