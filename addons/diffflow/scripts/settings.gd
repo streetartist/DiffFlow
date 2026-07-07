@@ -66,3 +66,18 @@ static func get_max_file_bytes() -> int:
 static func set_max_file_bytes(max_file_bytes: int) -> void:
 	var es := EditorInterface.get_editor_settings()
 	es.set_setting(SETTING_PREFIX + "max_file_bytes", max_file_bytes)
+
+static func get_client_id() -> String:
+	var es := EditorInterface.get_editor_settings()
+	var key := SETTING_PREFIX + "client_id"
+	if es.has_setting(key):
+		var saved := str(es.get_setting(key))
+		if not saved.is_empty():
+			return saved
+	var client_id := _generate_id("client")
+	es.set_setting(key, client_id)
+	return client_id
+
+static func _generate_id(prefix: String) -> String:
+	var crypto := Crypto.new()
+	return prefix + "-" + crypto.generate_random_bytes(16).hex_encode()

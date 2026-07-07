@@ -94,15 +94,22 @@ http://localhost:8090/admin
 
 超过后台阈值的文件不会同步。默认阈值是 100MB。
 
-## 默认忽略规则
+## 同步排除规则
 
-插件不会同步：
+插件内置只排除编辑器和版本控制的内部状态目录：
 
 - `.godot/`
 - `.git/`
-- `.import/`
-- `.uid`
-- `.import`、`.tmp`、`.remap` 后缀文件
+
+其他排除都通过项目根目录的 `.diffflowignore` 配置。这个文件会像普通项目文件一样同步给团队，支持常用 ignore 写法：
+
+- 空行和 `#` 注释
+- `*`、`?` 通配符
+- `path/` 目录规则
+- `/path` 项目根路径规则
+- `!path` 反选规则
+
+本仓库的 `.diffflowignore` 排除了自托管服务端运行时文件，例如 `server/diffflow.db`、`server/diffflow.db-wal`、`server/data/` 和日志。普通用户项目里的 `.db` 文件不会被默认忽略，除非用户自己在 `.diffflowignore` 中写规则。
 
 ## 开发验证
 

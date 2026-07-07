@@ -20,9 +20,11 @@ var _project_id: int = 0
 var _max_file_bytes: int = 100 * 1024 * 1024
 var _initial_syncing := false
 var _transferring: Dictionary = {}
+var _ignore_rules: Array = []
+var _ignore_file_mtime: int = -1
 
-const IGNORE_DIRS := [".godot", ".git", ".import", ".claude", ".uid"]
-const IGNORE_FILE_SUFFIXES := [".uid", ".import", ".tmp", ".remap", ".db", ".sqlite", ".sqlite3", "-shm", "-wal", "-journal"]
+const IGNORE_FILE_NAME := ".diffflowignore"
+const BUILTIN_IGNORE_DIRS := [".git", ".godot"]
 
 func configure(server_url: String, token: String, project_id: int, max_file_bytes: int) -> void:
 	_server_url = _normalize_server_url(server_url)
@@ -37,6 +39,7 @@ func start(project_path: String) -> void:
 		_project_path += "/"
 	_file_cache.clear()
 	_hash_cache.clear()
+	_load_ignore_rules(true)
 	_scan_dir(_project_path, true)
 	_watching = false
 	_initial_syncing = true
@@ -57,6 +60,7 @@ func _process(delta: float) -> void:
 		_check_changes()
 
 func _check_changes() -> void:
+	_load_ignore_rules()
 	var current_files: Dictionary = {}
 	_scan_dir(_project_path, false, current_files)
 
@@ -78,6 +82,8 @@ func _check_changes() -> void:
 		var rel_path: String = str(rel_path_value)
 		_file_cache.erase(rel_path)
 		_hash_cache.erase(rel_path)
+		if _should_ignore_path(rel_path):
+			continue
 		_delete_remote(rel_path)
 
 func _initial_sync() -> void:
@@ -100,24 +106,18 @@ func _initial_sync() -> void:
 			if item is Dictionary:
 				server_files[item.get("path", "")] = item
 
+	if server_files.has(IGNORE_FILE_NAME):
+		await _sync_manifest_file(IGNORE_FILE_NAME, server_files[IGNORE_FILE_NAME])
+		_load_ignore_rules(true)
+
 	for rel_path_value in server_files.keys():
 		var rel_path: String = str(rel_path_value)
+		if rel_path == IGNORE_FILE_NAME:
+			continue
 		if _should_ignore_path(rel_path):
 			continue
 		var remote: Dictionary = server_files[rel_path]
-		var full_path: String = _project_path + rel_path
-		if not FileAccess.file_exists(full_path):
-			await _download_file(rel_path)
-			continue
-		var local_hash: String = _file_sha256(full_path)
-		_hash_cache[rel_path] = local_hash
-		if local_hash != remote.get("sha256", ""):
-			var local_mtime: int = FileAccess.get_modified_time(full_path)
-			var remote_mtime: int = int(remote.get("mtime", 0))
-			if local_mtime > remote_mtime:
-				await _upload_file(rel_path)
-			else:
-				await _download_file(rel_path)
+		await _sync_manifest_file(rel_path, remote)
 
 	for rel_path_value in _file_cache.keys():
 		var rel_path: String = str(rel_path_value)
@@ -131,11 +131,89 @@ func _initial_sync() -> void:
 	_watching = true
 	print("[DiffFlow] 首次同步完成，开始实时监听。")
 
+func _sync_manifest_file(rel_path: String, remote: Dictionary) -> void:
+	var full_path: String = _project_path + rel_path
+	if not FileAccess.file_exists(full_path):
+		await _download_file(rel_path)
+		return
+
+	var local_hash: String = _file_sha256(full_path)
+	_hash_cache[rel_path] = local_hash
+	if local_hash == remote.get("sha256", ""):
+		return
+
+	var local_mtime: int = FileAccess.get_modified_time(full_path)
+	var remote_mtime: int = int(remote.get("mtime", 0))
+	if local_mtime > remote_mtime:
+		await _upload_file(rel_path)
+	else:
+		await _download_file(rel_path)
+
 func _to_rel_path(full_path: String) -> String:
 	var normalized: String = full_path.replace("\\", "/")
 	if normalized.begins_with(_project_path):
 		return normalized.substr(_project_path.length())
 	return normalized
+
+func _normalize_rel_path(rel_path: String) -> String:
+	var normalized: String = rel_path.replace("\\", "/").strip_edges()
+	while normalized.begins_with("./"):
+		normalized = normalized.substr(2)
+	while normalized.begins_with("/"):
+		normalized = normalized.substr(1)
+	return normalized
+
+func _load_ignore_rules(force: bool = false) -> void:
+	var ignore_path: String = _project_path + IGNORE_FILE_NAME
+	var mtime: int = -1
+	if FileAccess.file_exists(ignore_path):
+		mtime = FileAccess.get_modified_time(ignore_path)
+	if not force and mtime == _ignore_file_mtime:
+		return
+
+	_ignore_file_mtime = mtime
+	_ignore_rules.clear()
+	if mtime < 0:
+		return
+
+	var file: FileAccess = FileAccess.open(ignore_path, FileAccess.READ)
+	if file == null:
+		return
+
+	while not file.eof_reached():
+		var line: String = file.get_line().strip_edges()
+		if line.is_empty() or line.begins_with("#"):
+			continue
+
+		var negated := false
+		if line.begins_with("!"):
+			negated = true
+			line = line.substr(1).strip_edges()
+			if line.is_empty():
+				continue
+
+		line = line.replace("\\", "/").strip_edges()
+		while line.begins_with("./"):
+			line = line.substr(2)
+		var anchored := false
+		if line.begins_with("/"):
+			anchored = true
+			line = line.substr(1)
+
+		var dir_only := false
+		while line.ends_with("/") and not line.is_empty():
+			dir_only = true
+			line = line.substr(0, line.length() - 1)
+		if line.is_empty():
+			continue
+
+		_ignore_rules.append({
+			"pattern": line,
+			"negated": negated,
+			"dir_only": dir_only,
+			"anchored": anchored,
+		})
+	file.close()
 
 func _scan_dir(path: String, initial: bool, out: Dictionary = {}) -> void:
 	var dir: DirAccess = DirAccess.open(path)
@@ -150,7 +228,7 @@ func _scan_dir(path: String, initial: bool, out: Dictionary = {}) -> void:
 		var full_path: String = path.path_join(fname).replace("\\", "/")
 		var rel_path: String = _to_rel_path(full_path)
 		if dir.current_is_dir():
-			if not _should_ignore_dir(fname):
+			if not _should_ignore_dir(rel_path):
 				_scan_dir(full_path, initial, out)
 		else:
 			if not _should_ignore_path(rel_path):
@@ -162,18 +240,75 @@ func _scan_dir(path: String, initial: bool, out: Dictionary = {}) -> void:
 		fname = dir.get_next()
 	dir.list_dir_end()
 
-func _should_ignore_dir(dirname: String) -> bool:
-	for d in IGNORE_DIRS:
-		if dirname == d or dirname.begins_with(d):
-			return true
-	return false
+func _should_ignore_dir(rel_path: String) -> bool:
+	rel_path = _normalize_rel_path(rel_path)
+	if _is_builtin_ignored(rel_path):
+		return true
+	return _matches_ignore_rules(rel_path, true)
 
 func _should_ignore_path(rel_path: String) -> bool:
-	var filename: String = rel_path.get_file()
-	for suffix in IGNORE_FILE_SUFFIXES:
-		if filename.ends_with(suffix):
-			return true
+	rel_path = _normalize_rel_path(rel_path)
+	if rel_path == IGNORE_FILE_NAME:
+		return false
+	if _is_builtin_ignored(rel_path):
+		return true
+	return _matches_ignore_rules(rel_path, false)
+
+func _is_builtin_ignored(rel_path: String) -> bool:
+	var parts: PackedStringArray = rel_path.split("/", false)
+	for part in parts:
+		for dirname in BUILTIN_IGNORE_DIRS:
+			if part == dirname:
+				return true
 	return false
+
+func _matches_ignore_rules(rel_path: String, is_dir: bool) -> bool:
+	var ignored := false
+	for rule in _ignore_rules:
+		if _ignore_rule_matches(rule, rel_path, is_dir):
+			var negated: bool = rule.get("negated", false)
+			ignored = not negated
+	return ignored
+
+func _ignore_rule_matches(rule: Dictionary, rel_path: String, is_dir: bool) -> bool:
+	var pattern: String = rule.get("pattern", "")
+	if pattern.is_empty():
+		return false
+
+	var dir_only: bool = rule.get("dir_only", false)
+	var anchored: bool = rule.get("anchored", false)
+	if dir_only:
+		for candidate in _dir_candidates(rel_path, is_dir):
+			if _pattern_matches_path(pattern, str(candidate), anchored):
+				return true
+		return false
+	return _pattern_matches_path(pattern, rel_path, anchored)
+
+func _dir_candidates(rel_path: String, is_dir: bool) -> Array:
+	var candidates: Array = []
+	var path := rel_path
+	if not is_dir:
+		path = rel_path.get_base_dir()
+	if path == "." or path.is_empty():
+		return candidates
+
+	var parts: PackedStringArray = path.split("/", false)
+	var current := ""
+	for part in parts:
+		current = part if current.is_empty() else current + "/" + part
+		candidates.append(current)
+	return candidates
+
+func _pattern_matches_path(pattern: String, rel_path: String, anchored: bool) -> bool:
+	var has_slash := pattern.find("/") >= 0
+	if anchored or has_slash:
+		return rel_path.match(pattern)
+
+	var parts: PackedStringArray = rel_path.split("/", false)
+	for part in parts:
+		if part.match(pattern):
+			return true
+	return rel_path.get_file().match(pattern)
 
 func upload_local_file(rel_path: String) -> void:
 	call_deferred("_upload_file", rel_path)
@@ -264,6 +399,8 @@ func _download_file(rel_path: String) -> void:
 		file.close()
 		_file_cache[rel_path] = FileAccess.get_modified_time(full_path)
 		_hash_cache[rel_path] = _file_sha256(full_path)
+		if rel_path == IGNORE_FILE_NAME:
+			_load_ignore_rules(true)
 		_reload_in_editor(res_path)
 	_transferring.erase(rel_path)
 

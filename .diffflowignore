@@ -1,0 +1,24 @@
+# DiffFlow sync excludes for this repository.
+# Project users can add their own rules here; this file is synced like normal project data.
+
+# Local editor and version-control state
+.godot/
+.git/
+
+# Self-hosted DiffFlow server runtime data
+server/diffflow.db
+server/diffflow.db-*
+server/diffflow.db*.tmp
+server/data/
+server/*.log
+
+# Local build outputs and caches
+.gocache/
+server/diffflow-server
+server/diffflow-server.exe
+server/diffflow-server-linux
+addons/diffflow/bin/windows/*.dll
+addons/diffflow/bin/linux/*.so
+addons/diffflow/bin/macos/*.framework
+gdextension/*.o
+gdextension/*.obj

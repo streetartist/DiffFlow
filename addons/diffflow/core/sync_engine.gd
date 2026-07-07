@@ -12,6 +12,7 @@ signal connection_changed(connected: bool)
 var _ws := WebSocketPeer.new()
 var _connected := false
 var _peer_id: String = ""
+var _client_id: String = ""
 var _username: String = ""
 var _session_token: String = ""
 var _project_id: int = 0
@@ -29,6 +30,7 @@ var _presence_timer := 0.0
 const PRESENCE_INTERVAL := 2.0
 
 func _ready() -> void:
+	_client_id = DFSettings.get_client_id()
 	_peer_id = _generate_peer_id()
 	_username = DFSettings.get_username()
 
@@ -86,6 +88,10 @@ func _build_ws_url() -> String:
 func connect_to_project() -> int:
 	if _server_url.is_empty() or _session_token.is_empty() or _project_id <= 0:
 		return ERR_UNCONFIGURED
+	if _client_id.is_empty():
+		_client_id = DFSettings.get_client_id()
+	if _peer_id.is_empty():
+		_peer_id = _generate_peer_id()
 	_was_connected = false
 	_auto_reconnect = true
 	_ws = WebSocketPeer.new()
@@ -108,6 +114,9 @@ func is_server_connected() -> bool:
 func get_peer_id() -> String:
 	return _peer_id
 
+func get_client_id() -> String:
+	return _client_id
+
 func get_project_id() -> int:
 	return _project_id
 
@@ -125,6 +134,7 @@ func _send_presence() -> void:
 	var msg := {
 		"type": "presence",
 		"peer_id": _peer_id,
+		"client_id": _client_id,
 		"username": _username,
 		"project_id": _project_id,
 		"project_name": _project_name,
@@ -150,8 +160,8 @@ func _on_message(data: PackedByteArray) -> void:
 			presence_updated.emit(event)
 
 func _generate_peer_id() -> String:
-	var project_path := ProjectSettings.globalize_path("res://")
-	return str(project_path.hash()).sha256_text().substr(0, 16)
+	var crypto := Crypto.new()
+	return "session-" + crypto.generate_random_bytes(16).hex_encode()
 
 func _normalize_server_url(url: String) -> String:
 	url = url.strip_edges()
