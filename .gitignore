@@ -1,0 +1,29 @@
+# DiffFlow
+# Godot
+.godot/
+*.import
+
+# GDExtension builds
+addons/diffflow/bin/windows/*.dll
+addons/diffflow/bin/linux/*.so
+addons/diffflow/bin/macos/*.framework
+
+# C++ build
+gdextension/*.o
+gdextension/*.obj
+
+# Go
+server/diffflow-server
+server/diffflow-server.exe
+server/diffflow-server-linux
+server/*.db
+server/*.db-shm
+server/*.db-wal
+server/data/
+server/*.log
+.gocache/
+
+# IDE
+.vscode/
+.idea/
+*.swp

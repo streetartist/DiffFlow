@@ -1,0 +1,11 @@
+[gd_scene load_steps=2 format=3 uid="uid://diffflow_main_dock"]
+
+[ext_resource type="Script" path="res://addons/diffflow/ui/dock/main_dock.gd" id="1"]
+
+[node name="DiffFlow" type="VBoxContainer"]
+custom_minimum_size = Vector2(280, 0)
+script = ExtResource("1")
+
+[node name="TabContainer" type="TabContainer" parent="."]
+layout_mode = 2
+size_flags_vertical = 3

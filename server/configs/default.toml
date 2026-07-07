@@ -1,0 +1,18 @@
+[server]
+addr = ":8090"
+
+[admin]
+username = "admin"
+password = "change-me"
+
+[storage]
+sqlite_path = "./diffflow.db"
+files_dir = "./data/files"
+
+[sync]
+# Files larger than this threshold are not synchronized. Admins can change it in the web console.
+max_file_mb = 100
+
+[security]
+# Change this before production deployment.
+session_secret = "change-me"

@@ -1,0 +1,57 @@
+[gd_scene load_steps=2 format=3 uid="uid://diffflow_git_panel"]
+
+[ext_resource type="Script" path="res://addons/diffflow/ui/dock/git_panel.gd" id="1"]
+
+[node name="GitPanel" type="VBoxContainer"]
+script = ExtResource("1")
+
+[node name="BranchBar" type="HBoxContainer" parent="."]
+layout_mode = 2
+
+[node name="BranchLabel" type="Label" parent="BranchBar"]
+layout_mode = 2
+text = "分支: "
+size_flags_horizontal = 3
+
+[node name="BranchOption" type="OptionButton" parent="BranchBar"]
+layout_mode = 2
+size_flags_horizontal = 3
+
+[node name="NewBranchBtn" type="Button" parent="BranchBar"]
+layout_mode = 2
+text = "+"
+tooltip_text = "新建分支"
+
+[node name="StatusList" type="ItemList" parent="."]
+layout_mode = 2
+size_flags_vertical = 3
+custom_minimum_size = Vector2(0, 120)
+allow_reselect = true
+
+[node name="CommitMsg" type="TextEdit" parent="."]
+layout_mode = 2
+custom_minimum_size = Vector2(0, 60)
+placeholder_text = "提交说明..."
+
+[node name="ActionBar" type="HBoxContainer" parent="."]
+layout_mode = 2
+
+[node name="RefreshBtn" type="Button" parent="ActionBar"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "刷新"
+
+[node name="CommitBtn" type="Button" parent="ActionBar"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "提交"
+
+[node name="PushBtn" type="Button" parent="ActionBar"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "推送"
+
+[node name="PullBtn" type="Button" parent="ActionBar"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "拉取"
