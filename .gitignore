@@ -1,6 +1,7 @@
 # DiffFlow
 # Godot
 .godot/
+.diffflow/
 *.import
 
 # GDExtension builds

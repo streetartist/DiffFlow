@@ -4,6 +4,7 @@
 # Local editor and version-control state
 .godot/
 .git/
+.diffflow/
 
 # Self-hosted DiffFlow server runtime data
 server/diffflow.db
